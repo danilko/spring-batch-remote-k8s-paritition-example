@@ -41,7 +41,7 @@ java -jar target/batchprocessing-0.0.1-SNAPSHOT.jar
 ```
 
 If quick enough, will able to see following, where the pod is spawned up as part of remote partition
-```aidl
+```
 kubectl get pods
 NAME                                 READY   STATUS      RESTARTS   AGE
 mariadb-6b48f78bbf-bmxsm             1/1     Running     0          4h7m
@@ -51,7 +51,7 @@ partitionedbatchjobtask-kdgp9w0exk   1/1     Running     0          2s
 
 Each pod will be carry its own partition context (partition0, partition1)
 Can be seen inside the pod definition on args field
-```aidl
+```
     Args:
       --spring.profiles.active=worker
       --spring.cloud.task.initialize.enable=false
@@ -66,8 +66,40 @@ Can be seen inside the pod definition on args field
 ```
 
 The pod current clean up is done through brute force, as this one example is not using full spring cloud method
-In after job, force clean up success/failed pod, if need, can comment out the deletion line to let pod remain
-```aidl
+
+If using job [current code implementation]
+```
+        kubernetesDeployerProperties.setCreateJob(true);
+```
+In after job, force clean up success/failed job , if need, can comment out the deletion line to let pod remain
+
+Job and its associated pod will be rmovoed through the `DeletionPropagation` policy
+
+Job is removed if there are success or fail attempt at least once. Combine with restart policy of 1 in 
+```
+            // Clean up jobs
+            Map<String, String> labels = new HashMap<String, String>();
+            labels.put("task-name",taskName);
+
+            // Base one new selector flag
+            // However, this portion is not that really stable, so may need to remove withFields portion to ensure clean up work across different k8s version
+            // Clean up success job
+            Map<String, String> fields = new HashMap<String, String>();
+            fields.put("status.successful","1");
+            kuberentesClient().batch().jobs().inNamespace("default").withLabels(labels).withPropagationPolicy(DeletionPropagation.BACKGROUND).delete();
+
+            fields.put("status.failed","1");
+            kuberentesClient().batch().jobs().inNamespace("default").withLabels(labels).withFields(fields)
+                    .withPropagationPolicy(DeletionPropagation.BACKGROUND).delete();
+```
+
+If using Pod (default) without set job to true
+
+In after job, force clean up success/failed pod , if need, can comment out the deletion line to let pod remain
+
+Then can use
+
+```
   @Bean
     public JobExecutionListener jobExecutionListener() {
     JobExecutionListener listener = new JobExecutionListener(){
@@ -98,7 +130,7 @@ In after job, force clean up success/failed pod, if need, can comment out the de
 Also demo how to use DockerResource and TaskLauncher to inject custom remote docker image with pod computing
 
 Custom K8S pod setting for CPU/MEMORY can be found in
-```aidl
+```
     @Bean
     public TaskLauncher taskLauncher()
 ...

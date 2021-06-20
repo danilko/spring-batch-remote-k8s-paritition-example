@@ -1,5 +1,6 @@
 package com.example.batchprocessing;
 
+import io.fabric8.kubernetes.api.model.DeletionPropagation;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import org.springframework.batch.core.*;
 import org.springframework.batch.core.configuration.JobRegistry;
@@ -43,6 +44,9 @@ public class BatchConfiguration {
 
     // Set the grid (also controller worker)
     private static final int  GRID_SIZE = 2;
+
+    // Set the kuberentes job name
+    private String taskName="partitionedbatchjobtask";
 
     @Autowired
     public JobBuilderFactory jobBuilderFactory;
@@ -105,8 +109,7 @@ public class BatchConfiguration {
         KubernetesDeployerProperties kubernetesDeployerProperties = new KubernetesDeployerProperties();
         kubernetesDeployerProperties.setNamespace("default");
 
-        //Hard to clean up so not using jobs for now
-        //kubernetesDeployerProperties.setCreateJob(true);
+        kubernetesDeployerProperties.setCreateJob(true);
 
         // Database setup to reference configmap for database info
         List<KubernetesDeployerProperties.ConfigMapKeyRef> configMapKeyRefList = new ArrayList<KubernetesDeployerProperties.ConfigMapKeyRef>();
@@ -160,9 +163,11 @@ public class BatchConfiguration {
         // Set task launcher properties to not repeat and not restart
         KubernetesTaskLauncherProperties kubernetesTaskLauncherProperties = new KubernetesTaskLauncherProperties();
         kubernetesTaskLauncherProperties.setBackoffLimit(1);
-        kubernetesTaskLauncherProperties.setRestartPolicy(RestartPolicy.Never);
+        kubernetesTaskLauncherProperties.setRestartPolicy(RestartPolicy.OnFailure);
         KubernetesTaskLauncher kubernetesTaskLauncher = new KubernetesTaskLauncher(kubernetesDeployerProperties,
                 kubernetesTaskLauncherProperties, kuberentesClient());
+
+
 
         return kubernetesTaskLauncher;
     }
@@ -204,7 +209,8 @@ public class BatchConfiguration {
                 .setCommandLineArgsProvider(new PassThroughCommandLineArgsProvider(commandLineArgs));
         partitionHandler.setEnvironmentVariablesProvider(new NoOpEnvironmentVariablesProvider());
         partitionHandler.setMaxWorkers(GRID_SIZE);
-        partitionHandler.setApplicationName("PartitionedBatchJobTask");
+
+        partitionHandler.setApplicationName(taskName);
 
         return partitionHandler;
     }
@@ -220,18 +226,23 @@ public class BatchConfiguration {
 
         @Override
         public void afterJob(JobExecution jobExecution) {
+
             // Clean up jobs
-            Map<String, String> fields = new HashMap<String, String>();
-            fields.put("status.phase","Succeeded");
-
             Map<String, String> labels = new HashMap<String, String>();
-            labels.put("role","spring-app");
+            labels.put("task-name",taskName);
 
-            kuberentesClient().pods().inNamespace("default").withLabels(labels).withFields(fields).delete();
+            // Base one new selector flag
+            // However, this portion is not that really stable,
+            // so may need to remove withFields portion to ensure clean up work across different k8s version
+            // As the status.successful/failed is changing between k8s version for job
+            // Clean up success job
+            Map<String, String> fields = new HashMap<String, String>();
+            fields.put("status.successful","1");
+            kuberentesClient().batch().jobs().inNamespace("default").withLabels(labels).withPropagationPolicy(DeletionPropagation.BACKGROUND).delete();
 
-            fields.put("status.phase","Failed");
-            kuberentesClient().pods().inNamespace("default").withLabels(labels).withFields(fields).delete();
-
+            fields.put("status.failed","1");
+            kuberentesClient().batch().jobs().inNamespace("default").withLabels(labels).withFields(fields)
+                    .withPropagationPolicy(DeletionPropagation.BACKGROUND).delete();
         }
     };
 
