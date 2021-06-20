@@ -1,5 +1,8 @@
 # spring-batch-remote-k8s-paritition-example
 Example to setup Spring Batch with Remote Partition Execution through Spring Cloud Deployer Kuberentes 
+
+This certainly is not the most accurate/most efficent approach. But just one approach to the problem, as thought there is no complete doc online, so thought to collect my underatnding and share with others
+
 Derived from Spring IO default local deployer, and update to make to deploy on K8S (also make it compile and work on my local laptop, as original sample seem not work out of box for me)
 
 Reference
