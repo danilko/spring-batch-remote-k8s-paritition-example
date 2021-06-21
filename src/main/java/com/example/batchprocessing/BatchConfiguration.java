@@ -1,6 +1,9 @@
 package com.example.batchprocessing;
 
 import io.fabric8.kubernetes.api.model.DeletionPropagation;
+import io.fabric8.kubernetes.api.model.batch.JobList;
+import io.fabric8.kubernetes.api.model.batch.JobSpec;
+import io.fabric8.kubernetes.api.model.batch.JobStatus;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import org.springframework.batch.core.*;
 import org.springframework.batch.core.configuration.JobRegistry;
@@ -33,6 +36,7 @@ import org.springframework.core.env.Environment;
 import org.springframework.core.io.Resource;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.core.task.TaskRejectedException;
+import org.springframework.util.StringUtils;
 
 import java.util.*;
 
@@ -44,6 +48,8 @@ public class BatchConfiguration {
 
     // Set the grid (also controller worker)
     private static final int  GRID_SIZE = 2;
+
+    private static int BACK_OFF_LIMIT = 6;
 
     // Set the kuberentes job name
     private String taskName="partitionedbatchjobtask";
@@ -162,8 +168,11 @@ public class BatchConfiguration {
 
         // Set task launcher properties to not repeat and not restart
         KubernetesTaskLauncherProperties kubernetesTaskLauncherProperties = new KubernetesTaskLauncherProperties();
-        kubernetesTaskLauncherProperties.setBackoffLimit(1);
-        kubernetesTaskLauncherProperties.setRestartPolicy(RestartPolicy.OnFailure);
+
+        // https://kubernetes.io/docs/concepts/workloads/controllers/job/
+        // Set to never to create new pod on restart
+        kubernetesTaskLauncherProperties.setBackoffLimit(BACK_OFF_LIMIT);
+        kubernetesTaskLauncherProperties.setRestartPolicy(RestartPolicy.Never);
         KubernetesTaskLauncher kubernetesTaskLauncher = new KubernetesTaskLauncher(kubernetesDeployerProperties,
                 kubernetesTaskLauncherProperties, kuberentesClient());
 
@@ -231,18 +240,26 @@ public class BatchConfiguration {
             Map<String, String> labels = new HashMap<String, String>();
             labels.put("task-name",taskName);
 
-            // Base one new selector flag
-            // However, this portion is not that really stable,
-            // so may need to remove withFields portion to ensure clean up work across different k8s version
-            // As the status.successful/failed is changing between k8s version for job
-            // Clean up success job
-            Map<String, String> fields = new HashMap<String, String>();
-            fields.put("status.successful","1");
-            kuberentesClient().batch().jobs().inNamespace("default").withLabels(labels).withPropagationPolicy(DeletionPropagation.BACKGROUND).delete();
 
-            fields.put("status.failed","1");
-            kuberentesClient().batch().jobs().inNamespace("default").withLabels(labels).withFields(fields)
-                    .withPropagationPolicy(DeletionPropagation.BACKGROUND).delete();
+            List<io.fabric8.kubernetes.api.model.batch.Job> joblist = kuberentesClient().batch().jobs().inNamespace("default").withLabels(labels).list().getItems();
+
+            for(int index = 0; index < joblist.size(); index++)
+            {
+                io.fabric8.kubernetes.api.model.batch.Job job = joblist.get(index);
+                JobStatus jobStatus = job.getStatus();
+
+                System.out.println(jobStatus.getConditions().get(0).getType()  + " CHECK JOB STATUS " + job.getMetadata().getName());
+                // Clean up job that is in Complete (Success)/Failed state
+                if(jobStatus.getConditions().get(0).getType().contains("Complete") ||
+                        jobStatus.getConditions().get(0).getType().contains("Failed"))
+                {
+                    kuberentesClient().batch().jobs().inNamespace("default")
+                            .withName(job.getMetadata().getName())
+                            .withPropagationPolicy(DeletionPropagation.BACKGROUND)
+                            .delete();
+                }
+
+            }
         }
     };
 

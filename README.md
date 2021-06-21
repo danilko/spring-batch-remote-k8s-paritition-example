@@ -77,20 +77,30 @@ Job and its associated pod will be rmovoed through the `DeletionPropagation` pol
 
 Job is removed if there are success or fail attempt at least once. Combine with restart policy of 1 in 
 ```
+
             // Clean up jobs
             Map<String, String> labels = new HashMap<String, String>();
             labels.put("task-name",taskName);
 
-            // Base one new selector flag
-            // However, this portion is not that really stable, so may need to remove withFields portion to ensure clean up work across different k8s version
-            // Clean up success job
-            Map<String, String> fields = new HashMap<String, String>();
-            fields.put("status.successful","1");
-            kuberentesClient().batch().jobs().inNamespace("default").withLabels(labels).withPropagationPolicy(DeletionPropagation.BACKGROUND).delete();
+            List<io.fabric8.kubernetes.api.model.batch.Job> joblist = kuberentesClient().batch().jobs().inNamespace("default").withLabels(labels).list().getItems();
 
-            fields.put("status.failed","1");
-            kuberentesClient().batch().jobs().inNamespace("default").withLabels(labels).withFields(fields)
-                    .withPropagationPolicy(DeletionPropagation.BACKGROUND).delete();
+            for(int index = 0; index < joblist.size(); index++)
+            {
+                io.fabric8.kubernetes.api.model.batch.Job job = joblist.get(index);
+                JobStatus jobStatus = job.getStatus();
+
+                System.out.println(jobStatus.getConditions().get(0).getType()  + " CHECK JOB STATUS " + job.getMetadata().getName());
+                // Clean up job that is in Complete (Success)/Failed state
+                if(jobStatus.getConditions().get(0).getType().contains("Complete") ||
+                        jobStatus.getConditions().get(0).getType().contains("Failed"))
+                {
+                    kuberentesClient().batch().jobs().inNamespace("default")
+                            .withName(job.getMetadata().getName())
+                            .withPropagationPolicy(DeletionPropagation.BACKGROUND)
+                            .delete();
+                }
+
+            }
 ```
 
 If using Pod (default) without set job to true
@@ -100,7 +110,7 @@ In after job, force clean up success/failed pod , if need, can comment out the d
 Then can use
 
 ```
-  @Bean
+    @Bean
     public JobExecutionListener jobExecutionListener() {
     JobExecutionListener listener = new JobExecutionListener(){
         @Override
@@ -111,18 +121,31 @@ Then can use
 
         @Override
         public void afterJob(JobExecution jobExecution) {
+
             // Clean up jobs
-            Map<String, String> fields = new HashMap<String, String>();
-            fields.put("status.phase","Succeeded");
-
             Map<String, String> labels = new HashMap<String, String>();
-            labels.put("role","spring-app");
+            labels.put("task-name",taskName);
 
-            kuberentesClient().pods().inNamespace("default").withLabels(labels).withFields(fields).delete();
 
-            fields.put("status.phase","Failed");
-            kuberentesClient().pods().inNamespace("default").withLabels(labels).withFields(fields).delete();
+            List<io.fabric8.kubernetes.api.model.batch.Job> joblist = kuberentesClient().batch().jobs().inNamespace("default").withLabels(labels).list().getItems();
 
+            for(int index = 0; index < joblist.size(); index++)
+            {
+                io.fabric8.kubernetes.api.model.batch.Job job = joblist.get(index);
+                JobStatus jobStatus = job.getStatus();
+
+                System.out.println(jobStatus.getConditions().get(0).getType()  + " CHECK JOB STATUS " + job.getMetadata().getName());
+                // Clean up job that is in Complete (Success)/Failed state
+                if(jobStatus.getConditions().get(0).getType().contains("Complete") ||
+                        jobStatus.getConditions().get(0).getType().contains("Failed"))
+                {
+                    kuberentesClient().batch().jobs().inNamespace("default")
+                            .withName(job.getMetadata().getName())
+                            .withPropagationPolicy(DeletionPropagation.BACKGROUND)
+                            .delete();
+                }
+
+            }
         }
     };
 ```
