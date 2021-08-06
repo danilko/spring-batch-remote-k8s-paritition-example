@@ -29,6 +29,8 @@ import org.springframework.cloud.deployer.spi.kubernetes.*;
 import org.springframework.cloud.deployer.spi.task.TaskLauncher;
 import org.springframework.cloud.task.batch.partition.*;
 import org.springframework.cloud.task.configuration.EnableTask;
+import org.springframework.cloud.task.repository.TaskExecution;
+import org.springframework.cloud.task.repository.TaskExplorer;
 import org.springframework.cloud.task.repository.TaskRepository;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
@@ -74,6 +76,9 @@ public class BatchConfiguration {
 
     @Autowired
     public TaskRepository taskRepository;
+
+    @Autowired
+    public TaskExplorer taskExplorer;
 
     @Autowired
     private ConfigurableApplicationContext context;
@@ -251,12 +256,23 @@ public class BatchConfiguration {
                                                    JobExplorer jobExplorer,
                                              @Value("#{stepExecution}") StepExecution stepExecution) throws Exception {
 
+        String step ="processor";
+
+        if(stepExecution.getStepName().equalsIgnoreCase("partitionReaderStep")) {
+            step = "reader";
+        }
+
         // Use local build image
-        DockerResource resource = new DockerResource("worker:latest");
+        DockerResource resource = new DockerResource(stepExecution.getJobExecution().getExecutionContext().getString(step + "WorkerImage"));
+
 
         DeployerPartitionHandler partitionHandler =
-                new DeployerPartitionHandler(taskLauncher, jobExplorer, resource, "workerStepProcessor", taskRepository);
+                new DeployerPartitionHandler(taskLauncher, jobExplorer, resource,
+                        stepExecution.getJobExecution().getExecutionContext().getString(step + "WorkerStep")
+                        , taskRepository);
 
+
+        
         List<String> commandLineArgs = new ArrayList<>(3);
         commandLineArgs.add("--spring.profiles.active=worker");
         commandLineArgs.add("--spring.cloud.task.initialize.enable=false");
@@ -266,16 +282,8 @@ public class BatchConfiguration {
         partitionHandler.setEnvironmentVariablesProvider(new NoOpEnvironmentVariablesProvider());
         partitionHandler.setMaxWorkers(2);
 
-        if(stepExecution.getStepName().equalsIgnoreCase("partitionReaderStep"))
-        {
-             partitionHandler.setMaxWorkers(Integer.parseInt(stepExecution.getJobExecution().getExecutionContext().getString("readerGridSize")));
-            partitionHandler.setApplicationName(taskName_prefix + "reader");
-        }
-        else
-        {
-           partitionHandler.setMaxWorkers(Integer.parseInt(stepExecution.getJobExecution().getExecutionContext().getString("processorGridSize")));
-            partitionHandler.setApplicationName(taskName_prefix + "processor");
-        }
+             partitionHandler.setMaxWorkers(Integer.parseInt(stepExecution.getJobExecution().getExecutionContext().getString(step + "GridSize")));
+            partitionHandler.setApplicationName(taskName_prefix + step);
 
 
 
