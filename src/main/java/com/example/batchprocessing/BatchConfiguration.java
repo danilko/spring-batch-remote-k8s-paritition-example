@@ -51,9 +51,6 @@ import java.util.*;
 @EnableTask
 public class BatchConfiguration {
 
-    // Set the grid (also controller worker)
-    private static final int  GRID_SIZE = 2;
-
     private static int BACK_OFF_LIMIT = 6;
 
     // Set the kuberentes job name
@@ -99,16 +96,17 @@ public class BatchConfiguration {
                 Map<String, ExecutionContext> partitions = new HashMap<>(gridSize);
 
                 int targetGridSize = 0;
-
+                String step = "";
                 if(stepExecution.getStepName().equalsIgnoreCase("partitionReaderStep"))
                 {
-                    targetGridSize = Integer.parseInt(stepExecution.getJobExecution().getExecutionContext().getString("readerGridSize"));
+                    step = "reader";
                 }
                 else
                 {
-                    targetGridSize = Integer.parseInt(stepExecution.getJobExecution().getExecutionContext().getString("processorGridSize"));
+                    step = "processor";
                 }
 
+                targetGridSize = Integer.parseInt(stepExecution.getJobExecution().getExecutionContext().getString(step + "WorkerGridSize"));
 
                 for (int i = 0; i < targetGridSize; i++) {
                     ExecutionContext context1 = new ExecutionContext();
@@ -179,20 +177,24 @@ public class BatchConfiguration {
         KubernetesDeployerProperties.RequestsResources request = new KubernetesDeployerProperties.RequestsResources();
         KubernetesDeployerProperties.LimitsResources limit = new KubernetesDeployerProperties.LimitsResources();
 
+        String step = "";
+
         if(stepExecution.getStepName().equalsIgnoreCase("partitionReaderStep"))
         {
-            request.setCpu(stepExecution.getJobExecution().getExecutionContext().getString("readerCPURequest"));
-            limit.setCpu(stepExecution.getJobExecution().getExecutionContext().getString("readerCPULimit"));
+            step="reader";
         }
         else
         {
-            request.setCpu(stepExecution.getJobExecution().getExecutionContext().getString("processorCPURequest"));
-            limit.setCpu(stepExecution.getJobExecution().getExecutionContext().getString("processorCPULimit"));
+            step="processor";
         }
 
-
+        request.setCpu(stepExecution.getJobExecution().getExecutionContext().getString(step + "CPURequest"));
         request.setMemory("2000Mi");
+
+
+        limit.setCpu(stepExecution.getJobExecution().getExecutionContext().getString(step +"CPULimit"));
         limit.setMemory("3000Mi");
+
 
         kubernetesDeployerProperties.setRequests(request);
         kubernetesDeployerProperties.setLimits(limit);
@@ -271,8 +273,22 @@ public class BatchConfiguration {
                         stepExecution.getJobExecution().getExecutionContext().getString(step + "WorkerStep")
                         , taskRepository);
 
+        // Issue https://github.com/spring-cloud/spring-cloud-task/issues/793
+        // Perform the setting of execution as this partitioner now not created at task level so @beforetask is no longer vaild
+        // The problem is DeployerPartitionHandler utilize annoation @BeforeTask to force task to pass in TaskExecution object as part of Task setup
+        // But as this partionerHandler is now at @StepScope (instead of directly at @Bean level with @Enable Task), that setup is no longer triggered
+        // Resulted created DeployerHandler faced a null
 
-        
+        // Below is essentially a workaround to use the current job execution id to retrieve the associated task execution id
+        // From there, got that task execution and passed to deploy handler to fulfill its need of taskExecution reference
+        // It seem to work, but still not clear if there is other side effect (so far during test not found any)
+        long executionId = taskExplorer.getTaskExecutionIdByJobExecutionId(stepExecution.getJobExecutionId());
+
+        System.out.println("Current execution job to task execution id " + executionId);
+        TaskExecution taskExecution = taskExplorer.getTaskExecution(taskExplorer.getTaskExecutionIdByJobExecutionId(stepExecution.getJobExecutionId()));
+        System.out.println("Current execution job to task execution is not null: " + (taskExecution != null));
+        partitionHandler.beforeTask(taskExecution);
+
         List<String> commandLineArgs = new ArrayList<>(3);
         commandLineArgs.add("--spring.profiles.active=worker");
         commandLineArgs.add("--spring.cloud.task.initialize.enable=false");
@@ -280,12 +296,9 @@ public class BatchConfiguration {
         partitionHandler
                 .setCommandLineArgsProvider(new PassThroughCommandLineArgsProvider(commandLineArgs));
         partitionHandler.setEnvironmentVariablesProvider(new NoOpEnvironmentVariablesProvider());
-        partitionHandler.setMaxWorkers(2);
+        partitionHandler.setMaxWorkers(Integer.parseInt(stepExecution.getJobExecution().getExecutionContext().getString(step + "WorkerGridSize")));
 
-             partitionHandler.setMaxWorkers(Integer.parseInt(stepExecution.getJobExecution().getExecutionContext().getString(step + "GridSize")));
             partitionHandler.setApplicationName(taskName_prefix + step);
-
-
 
         return partitionHandler;
     }
@@ -299,16 +312,16 @@ public class BatchConfiguration {
             jobExecution.getExecutionContext().putString("readerCPURequest", "1");
             jobExecution.getExecutionContext().putString("readerCPULimit", "2");
 
-            jobExecution.getExecutionContext().putString("readerGridSize", "1");
+            jobExecution.getExecutionContext().putString("readerWorkerGridSize", "1");
 
-            // For now using same image for reader/processor, but if it work, will split them
+            // For now using same image for reader/processor, but if it work, can split them
             jobExecution.getExecutionContext().putString("readerWorkerImage", "worker:latest");
             jobExecution.getExecutionContext().putString("readerWorkerStep", "workerStepReader");
 
             jobExecution.getExecutionContext().putString("processorCPURequest", "3");
             jobExecution.getExecutionContext().putString("processorCPULimit", "4");
 
-            jobExecution.getExecutionContext().putString("processorGridSize", "2");
+            jobExecution.getExecutionContext().putString("processorWorkerGridSize", "2");
 
             // For now using same image for reader/processor, but if it work, will split them
             jobExecution.getExecutionContext().putString("processorWorkerImage", "worker:latest");
@@ -351,11 +364,12 @@ public class BatchConfiguration {
     @Bean
     @StepScope
     public Tasklet workerTaskletReader(
-            final @Value("#{stepExecutionContext['partitionNumber']}") Integer partitionNumber) {
+            final @Value("#{stepExecution}") StepExecution stepExecution) {
 
         return new Tasklet() {
             @Override
             public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) throws Exception {
+                Integer partitionNumber = stepExecution.getExecutionContext().getInt("partitionNumber");
                 System.out.println("This workerTaskletReader ran partition: " + partitionNumber);
 
                 return RepeatStatus.FINISHED;
@@ -366,11 +380,12 @@ public class BatchConfiguration {
     @Bean
     @StepScope
     public Tasklet workerTaskletProcessor(
-            final @Value("#{stepExecutionContext['partitionNumber']}") Integer partitionNumber) {
+            final @Value("#{stepExecution}") StepExecution stepExecution) {
 
         return new Tasklet() {
             @Override
             public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) throws Exception {
+                Integer partitionNumber = stepExecution.getExecutionContext().getInt("partitionNumber");
                 System.out.println("This workerTaskletProcessor ran partition: " + partitionNumber);
 
                 return RepeatStatus.FINISHED;
