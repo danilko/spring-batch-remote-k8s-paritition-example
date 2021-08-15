@@ -1,4 +1,132 @@
-# spring-batch-remote-k8s-paritition-example
+# spring-batch-remote-k8s-paritition-example (ATTEMPT #2 - PartitionerHandler + TaskLauncher with `@StepScope`)
+---
+
+Update possible workaround
+---
+
+After digging more, identify a theory and a workaround (but may need others to confirm, after testing not found any issue)
+
+Root cause analyze (hypothesis)
+---
+The problem is DeployerPartitionHandler utilize annoation @BeforeTask to force task to pass in TaskExecution object as part of Task setup
+
+But as this partionerHandler is now at @StepScope (instead of directly at @Bean level with @Enable Task) or there are two partitionHandler, that setup is no longer triggered, as `@EnableTask` seem not able to locate one `partitionhandler` during creation.
+
+https://github.com/spring-cloud/spring-cloud-task/blob/main/spring-cloud-task-batch/src/main/java/org/springframework/cloud/task/batch/partition/DeployerPartitionHandler.java @ 269
+
+ Resulted created DeployerHandler faced a null with `taskExecution` when trying to launch (as it is never setup)
+
+https://github.com/spring-cloud/spring-cloud-task/blob/main/spring-cloud-task-batch/src/main/java/org/springframework/cloud/task/batch/partition/DeployerPartitionHandler.java @ 347
+
+Workaround Resolution
+---
+Below is essentially a workaround to use the current job execution id to retrieve the associated task execution id
+From there, got that task execution and passed to deploy handler to fulfill its need of taskExecution reference
+It seem to work, but still not clear if there is other side effect (so far during test not found any)
+
+In the partitionHandler method
+
+```
+    @Bean
+    @StepScope
+    public PartitionHandler partitionHandler(TaskLauncher taskLauncher,
+                                                   JobExplorer jobExplorer,
+                                             @Value("#{stepExecution}") StepExecution stepExecution) throws Exception {
+
+...
+
+      // After the declaration of partitionhandler
+        DeployerPartitionHandler partitionHandler =
+                new DeployerPartitionHandler(taskLauncher, jobExplorer, resource,
+                        stepExecution.getJobExecution().getExecutionContext().getString(step + "WorkerStep")
+                        , taskRepository);
+
+        // Issue https://github.com/spring-cloud/spring-cloud-task/issues/793
+        // Perform the setting of execution as this partitioner now not created at task level so @beforetask is no longer vaild
+        // The problem is DeployerPartitionHandler utilize annoation @BeforeTask to force task to pass in TaskExecution object as part of Task setup
+        // But as this partionerHandler is now at @StepScope (instead of directly at @Bean level with @Enable Task), that setup is no longer triggered
+        // Resulted created DeployerHandler faced a null
+
+        // Below is essentially a workaround to use the current job execution id to retrieve the associated task execution id
+        // From there, got that task execution and passed to deploy handler to fulfill its need of taskExecution reference
+        // It seem to work, but still not clear if there is other side effect (so far during test not found any)
+        long executionId = taskExplorer.getTaskExecutionIdByJobExecutionId(stepExecution.getJobExecutionId());
+
+        System.out.println("Current execution job to task execution id " + executionId);
+        TaskExecution taskExecution = taskExplorer.getTaskExecution(taskExplorer.getTaskExecutionIdByJobExecutionId(stepExecution.getJobExecutionId()));
+        System.out.println("Current execution job to task execution is not null: " + (taskExecution != null));
+        partitionHandler.beforeTask(taskExecution);
+...
+
+// rest of code continue
+```
+
+
+
+
+Original Issue
+--- 
+
+Detail issue can be found in 
+
+https://stackoverflow.com/questions/68647761/spring-batch-with-multi-step-spring-cloud-task-partitionhandler-for-remote-p
+
+GitHub issue opened at Spring Cloud by another user
+https://github.com/spring-cloud/spring-cloud-task/issues/793
+
+ 2. Define PartitionerHandler + TaskLauncher with @StepScope
+
+
+Result:
+```
+java.lang.NullPointerException: null
+	at org.springframework.cloud.task.batch.partition.DeployerPartitionHandler.launchWorker(DeployerPartitionHandler.java:347) ~[spring-cloud-task-batch-2.3.1-SNAPSHOT.jar!/:2.3.1-SNAPSHOT]
+	at org.springframework.cloud.task.batch.partition.DeployerPartitionHandler.launchWorkers(DeployerPartitionHandler.java:313) ~[spring-cloud-task-batch-2.3.1-SNAPSHOT.jar!/:2.3.1-SNAPSHOT]
+	at org.springframework.cloud.task.batch.partition.DeployerPartitionHandler.handle(DeployerPartitionHandler.java:302) ~[spring-cloud-task-batch-2.3.1-SNAPSHOT.jar!/:2.3.1-SNAPSHOT]
+	at org.springframework.batch.core.partition.support.PartitionStep.doExecute(PartitionStep.java:106) ~[spring-batch-core-4.3.3.jar!/:4.3.3]
+	at org.springframework.batch.core.step.AbstractStep.execute(AbstractStep.java:208) ~[spring-batch-core-4.3.3.jar!/:4.3.3]
+	at org.springframework.batch.core.job.SimpleStepHandler.handleStep(SimpleStepHandler.java:152) ~[spring-batch-core-4.3.3.jar!/:4.3.3]
+	at org.springframework.batch.core.job.AbstractJob.handleStep(AbstractJob.java:413) ~[spring-batch-core-4.3.3.jar!/:4.3.3]
+	at org.springframework.batch.core.job.SimpleJob.doExecute(SimpleJob.java:136) ~[spring-batch-core-4.3.3.jar!/:4.3.3]
+	at org.springframework.batch.core.job.AbstractJob.execute(AbstractJob.java:320) ~[spring-batch-core-4.3.3.jar!/:4.3.3]
+	at org.springframework.batch.core.launch.support.SimpleJobLauncher$1.run(SimpleJobLauncher.java:149) ~[spring-batch-core-4.3.3.jar!/:4.3.3]
+	at org.springframework.core.task.SyncTaskExecutor.execute(SyncTaskExecutor.java:50) ~[spring-core-5.3.7.jar!/:5.3.7]
+	at org.springframework.batch.core.launch.support.SimpleJobLauncher.run(SimpleJobLauncher.java:140) ~[spring-batch-core-4.3.3.jar!/:4.3.3]
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method) ~[na:na]
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:62) ~[na:na]
+	at java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43) ~[na:na]
+	at java.base/java.lang.reflect.Method.invoke(Method.java:566) ~[na:na]
+	at org.springframework.aop.support.AopUtils.invokeJoinpointUsingReflection(AopUtils.java:344) ~[spring-aop-5.3.7.jar!/:5.3.7]
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.invokeJoinpoint(ReflectiveMethodInvocation.java:198) ~[spring-aop-5.3.7.jar!/:5.3.7]
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:163) ~[spring-aop-5.3.7.jar!/:5.3.7]
+	at org.springframework.batch.core.configuration.annotation.SimpleBatchConfiguration$PassthruAdvice.invoke(SimpleBatchConfiguration.java:128) ~[spring-batch-core-4.3.3.jar!/:4.3.3]
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:186) ~[spring-aop-5.3.7.jar!/:5.3.7]
+	at org.springframework.aop.framework.JdkDynamicAopProxy.invoke(JdkDynamicAopProxy.java:215) ~[spring-aop-5.3.7.jar!/:5.3.7]
+	at com.sun.proxy.$Proxy51.run(Unknown Source) ~[na:na]
+	at org.springframework.boot.autoconfigure.batch.JobLauncherApplicationRunner.execute(JobLauncherApplicationRunner.java:199) ~[spring-boot-autoconfigure-2.4.6.jar!/:2.4.6]
+	at org.springframework.boot.autoconfigure.batch.JobLauncherApplicationRunner.executeLocalJobs(JobLauncherApplicationRunner.java:173) ~[spring-boot-autoconfigure-2.4.6.jar!/:2.4.6]
+	at org.springframework.boot.autoconfigure.batch.JobLauncherApplicationRunner.launchJobFromProperties(JobLauncherApplicationRunner.java:160) ~[spring-boot-autoconfigure-2.4.6.jar!/:2.4.6]
+	at org.springframework.boot.autoconfigure.batch.JobLauncherApplicationRunner.run(JobLauncherApplicationRunner.java:155) ~[spring-boot-autoconfigure-2.4.6.jar!/:2.4.6]
+	at org.springframework.boot.autoconfigure.batch.JobLauncherApplicationRunner.run(JobLauncherApplicationRunner.java:150) ~[spring-boot-autoconfigure-2.4.6.jar!/:2.4.6]
+	at org.springframework.boot.SpringApplication.callRunner(SpringApplication.java:799) ~[spring-boot-2.4.6.jar!/:2.4.6]
+	at org.springframework.boot.SpringApplication.callRunners(SpringApplication.java:789) ~[spring-boot-2.4.6.jar!/:2.4.6]
+	at org.springframework.boot.SpringApplication.run(SpringApplication.java:346) ~[spring-boot-2.4.6.jar!/:2.4.6]
+	at org.springframework.boot.SpringApplication.run(SpringApplication.java:1329) ~[spring-boot-2.4.6.jar!/:2.4.6]
+	at org.springframework.boot.SpringApplication.run(SpringApplication.java:1318) ~[spring-boot-2.4.6.jar!/:2.4.6]
+	at com.example.batchprocessing.BatchProcessingApplication.main(BatchProcessingApplication.java:10) ~[classes!/:0.0.1-SNAPSHOT]
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method) ~[na:na]
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:62) ~[na:na]
+	at java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43) ~[na:na]
+	at java.base/java.lang.reflect.Method.invoke(Method.java:566) ~[na:na]
+	at org.springframework.boot.loader.MainMethodRunner.run(MainMethodRunner.java:49) ~[batchprocessing-0.0.1-SNAPSHOT.jar:0.0.1-SNAPSHOT]
+	at org.springframework.boot.loader.Launcher.launch(Launcher.java:108) ~[batchprocessing-0.0.1-SNAPSHOT.jar:0.0.1-SNAPSHOT]
+	at org.springframework.boot.loader.Launcher.launch(Launcher.java:58) ~[batchprocessing-0.0.1-SNAPSHOT.jar:0.0.1-SNAPSHOT]
+	at org.springframework.boot.loader.JarLauncher.main(JarLauncher.java:88) ~[batchprocessing-0.0.1-SNAPSHOT.jar:0.0.1-SNAPSHOT]
+
+```
+
+
+
 Example to setup Spring Batch with Remote Partition Execution through Spring Cloud Deployer Kuberentes 
 
 This certainly is not the most accurate/most efficent approach. But just one approach to the problem, as thought there is no complete doc online, so thought to collect my underatnding and share with others
@@ -17,6 +145,13 @@ Build the image
 mvn clean package
 docker build . -t worker
 ```
+
+If using Fedora with podman and minikube
+```
+eval $(minikube docker-env)
+minikube image build . -t worker
+```
+
 
 Setup a MariaDB
 ```
